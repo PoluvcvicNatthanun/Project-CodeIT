@@ -1,4 +1,5 @@
 const { spawn } = require('node:child_process');
+const fs = require('node:fs/promises');
 const { Transform } = require('node:stream');
 const {
   AudioPlayerStatus,
@@ -11,12 +12,40 @@ const {
   joinVoiceChannel,
 } = require('@discordjs/voice');
 const ffmpegPath = require('ffmpeg-static');
-const { YOUTUBE_DL_PATH } = require('@distube/youtube-dl/src/constants');
+const youtubeDlConstants = require('@distube/youtube-dl/src/constants');
+const downloadYtDlp = require('@distube/youtube-dl/src/download');
+const YOUTUBE_DL_PATH =
+  process.env.YOUTUBE_DL_PATH || youtubeDlConstants.YOUTUBE_DL_PATH;
 
 const DEFAULT_VOLUME = 0.8;
 const VOLUME_STEP = 0.1;
 const NORMALIZE_FILTER = 'loudnorm=I=-16:TP=-1.5:LRA=11';
 const PROCESS_TIMEOUT_MS = 30_000;
+let ytDlpReady;
+
+async function ensureYtDlp() {
+  if (!ytDlpReady) {
+    ytDlpReady = (async () => {
+      try {
+        await fs.access(YOUTUBE_DL_PATH);
+      } catch (error) {
+        if (process.env.YOUTUBE_DL_PATH || error.code !== 'ENOENT') throw error;
+        await downloadYtDlp();
+        await fs.access(YOUTUBE_DL_PATH);
+      }
+    })().catch((error) => {
+      ytDlpReady = null;
+      const hint = process.env.YOUTUBE_DL_PATH
+        ? `ตรวจสอบค่า YOUTUBE_DL_PATH (${YOUTUBE_DL_PATH})`
+        : 'ตรวจสอบอินเทอร์เน็ตของโฮสต์ หรือตั้งค่า YOUTUBE_DL_PATH';
+      throw new Error(`ไม่พบ yt-dlp ที่ ${YOUTUBE_DL_PATH}; ${hint}`, {
+        cause: error,
+      });
+    });
+  }
+
+  await ytDlpReady;
+}
 
 function createPeakingFilter(sampleRate, frequency, gainDb, quality) {
   const amplitude = 10 ** (gainDb / 40);
@@ -172,7 +201,9 @@ function titleSimilarity(first, second) {
   return shared / Math.min(firstWords.size, secondWords.size);
 }
 
-function runYtDlp(args) {
+async function runYtDlp(args) {
+  await ensureYtDlp();
+
   return new Promise((resolve, reject) => {
     const process = spawn(YOUTUBE_DL_PATH, args, {
       windowsHide: true,
@@ -437,6 +468,7 @@ class MusicPlayer {
     const generation = ++queue.generation;
 
     try {
+      await ensureYtDlp();
       const ytDlp = spawn(
         YOUTUBE_DL_PATH,
         [
