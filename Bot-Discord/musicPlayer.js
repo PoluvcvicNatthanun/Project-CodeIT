@@ -858,16 +858,15 @@ class MusicPlayer {
     return queue.autoPlay;
   }
 
-  async searchYouTube(query, includeDetails = false) {
-    const args = ['--no-warnings'];
-    if (!includeDetails) args.push('--flat-playlist');
-    args.push(
+  async searchYouTube(query) {
+    const output = await runYtDlp([
+      '--no-warnings',
+      '--flat-playlist',
       '--dump-single-json',
       '--skip-download',
       '--',
       `ytsearch15:${query}`,
-    );
-    const output = await runYtDlp(args);
+    ]);
     return JSON.parse(output);
   }
 
@@ -921,7 +920,7 @@ class MusicPlayer {
 
     for (const query of queries) {
       try {
-        const result = await this.searchYouTube(query, followSeedArtist);
+        const result = await this.searchYouTube(query);
         addCandidates(result);
       } catch (error) {
         searchErrors.push(error.message || String(error));
