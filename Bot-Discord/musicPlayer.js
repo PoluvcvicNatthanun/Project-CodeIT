@@ -24,6 +24,21 @@ const DEFAULT_VOLUME = 0.8;
 const VOLUME_STEP = 0.1;
 const NORMALIZE_FILTER = 'loudnorm=I=-16:TP=-1.5:LRA=11';
 const PROCESS_TIMEOUT_MS = 30_000;
+const AUTOPLAY_ARTIST_TRACK_COUNT = 2;
+const THAI_TPOP_SEARCH_QUERIES = [
+  'เพลง T-pop ไทย',
+  'เพลงไทย T-pop ฮิต',
+  'T-pop เพลงใหม่',
+  'ศิลปิน T-pop ไทย เพลงฮิต',
+];
+const INTERNATIONAL_SEARCH_QUERIES = [
+  'international pop hits',
+  'global top hits',
+  'English pop hits',
+  'US UK chart hits',
+  'international hit songs',
+  'global pop music',
+];
 let ytDlpReady;
 let cookiesWarningShown = false;
 let ffmpegReady;
@@ -286,13 +301,64 @@ function normalizeTrackTitle(title) {
     .replace(/\s+/g, ' ');
 }
 
-function titleSimilarity(first, second) {
-  const firstWords = new Set(normalizeTrackTitle(first).split(' ').filter(Boolean));
-  const secondWords = new Set(normalizeTrackTitle(second).split(' ').filter(Boolean));
-  if (!firstWords.size || !secondWords.size) return 0;
+function getTrackArtistNames(track) {
+  const artists = [
+    track.artist,
+    track.album_artist,
+    track.albumArtist,
+    track.creator,
+    track.channel,
+    track.uploader,
+    ...(Array.isArray(track.artists)
+      ? track.artists
+      : typeof track.artists === 'string'
+        ? [track.artists]
+        : []),
+  ]
+    .filter((artist) => typeof artist === 'string' && artist.trim())
+    .map((artist) =>
+      normalizeTrackTitle(
+        artist
+          .replace(/\s+-\s+topic$/i, '')
+          .replace(/\s+(official|vevo|music channel)$/i, ''),
+      ),
+    )
+    .filter(Boolean);
 
-  const shared = [...firstWords].filter((word) => secondWords.has(word)).length;
-  return shared / Math.min(firstWords.size, secondWords.size);
+  if (!artists.length && typeof track.title === 'string') {
+    const titleArtist = track.title.match(/^(.+?)\s[-–—]\s.+$/);
+    if (titleArtist) {
+      artists.push(normalizeTrackTitle(titleArtist[1]));
+    }
+  }
+
+  return [...new Set(artists)];
+}
+
+function isThaiTrack(track) {
+  if (typeof track.language === 'string' && /^th(?:-|$)/i.test(track.language)) {
+    return true;
+  }
+
+  return [
+    track.title,
+    track.artist,
+    track.album_artist,
+    track.creator,
+    track.channel,
+    track.uploader,
+    ...(Array.isArray(track.artists)
+      ? track.artists
+      : typeof track.artists === 'string'
+        ? [track.artists]
+        : []),
+  ].some((value) => typeof value === 'string' && /[\u0E00-\u0E7F]/.test(value));
+}
+
+function hasSameArtist(track, artistNames) {
+  if (!artistNames.length) return false;
+  const candidateArtists = getTrackArtistNames(track);
+  return candidateArtists.some((artist) => artistNames.includes(artist));
 }
 
 async function runYtDlp(args) {
@@ -398,6 +464,13 @@ class MusicPlayer {
       url,
       duration: video.duration || 0,
       thumbnail: video.thumbnail,
+      artist: video.artist,
+      artists: video.artists,
+      album_artist: video.album_artist,
+      creator: video.creator,
+      channel: video.channel,
+      uploader: video.uploader,
+      language: video.language,
     };
   }
 
@@ -461,6 +534,8 @@ class MusicPlayer {
       tracks: [],
       currentTrack: null,
       lastTrack: null,
+      seedTrack: null,
+      autoPlayTrackCount: 0,
       currentProcess: null,
       bassFilter: null,
       resource: null,
@@ -524,6 +599,7 @@ class MusicPlayer {
         }
 
         track = recommendation;
+        queue.autoPlayTrackCount += 1;
         this.sendMusicCard(queue.textChannel, {
           title: '🎲 Autoplay — random pick',
           description: `[${track.title}](${track.url})`,
@@ -544,6 +620,7 @@ class MusicPlayer {
     }
     if (!track) return;
 
+    if (!queue.seedTrack) queue.seedTrack = track;
     queue.currentTrack = track;
     queue.lastTrack = track;
     if (track.id) {
@@ -795,11 +872,26 @@ class MusicPlayer {
 
   async findAutoplayTrack(queue) {
     const lastTrack = queue.lastTrack;
-    const title = lastTrack.title
-      .replace(/\s*[\[(](?:official|lyrics?|audio|music video|visuali[sz]er)[^\])]*[\])]/gi, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-    const queries = [...new Set([title, `${title} music`, `${title} similar songs`].filter(Boolean))];
+    const seedTrack = queue.seedTrack || lastTrack;
+    const seedArtistNames = getTrackArtistNames(seedTrack);
+    const thaiMusic = isThaiTrack(seedTrack);
+    const followSeedArtist =
+      (queue.autoPlayTrackCount || 0) < AUTOPLAY_ARTIST_TRACK_COUNT &&
+      seedArtistNames.length > 0;
+    const availableQueries = followSeedArtist
+      ? [
+          `${seedArtistNames[0]} songs`,
+          `${seedArtistNames[0]} music`,
+          `${seedArtistNames[0]} popular songs`,
+        ]
+      : [...(thaiMusic ? THAI_TPOP_SEARCH_QUERIES : INTERNATIONAL_SEARCH_QUERIES)];
+    const queries = [];
+    const queryCount = followSeedArtist ? availableQueries.length : 4;
+    while (queries.length < queryCount) {
+      const index = Math.floor(Math.random() * availableQueries.length);
+      queries.push(availableQueries.splice(index, 1)[0]);
+    }
+
     const candidates = new Map();
     const searchErrors = [];
 
@@ -814,6 +906,10 @@ class MusicPlayer {
           !video.id ||
           !video.title ||
           video.id === lastTrack.id ||
+          (!followSeedArtist && isThaiTrack(video) !== thaiMusic) ||
+          (followSeedArtist &&
+            getTrackArtistNames(video).length > 0 &&
+            !hasSameArtist(video, seedArtistNames)) ||
           (video.duration !== undefined && video.duration < 60)
         ) {
           continue;
@@ -831,28 +927,7 @@ class MusicPlayer {
       }
     }
 
-    const getDistinctResults = () => [...candidates.values()].filter((video) => {
-      if (
-        video.id === lastTrack.id ||
-        titleSimilarity(video.title, lastTrack.title) >= 0.6
-      ) {
-        return false;
-      }
-
-      return !queue.recentTrackTitles.some(
-        (recentTitle) => titleSimilarity(video.title, recentTitle) >= 0.8,
-      );
-    });
-    let results = getDistinctResults();
-    if (!results.length) {
-      try {
-        addCandidates(await this.searchYouTube('popular songs music'));
-        results = getDistinctResults();
-      } catch (error) {
-        searchErrors.push(error.message || String(error));
-      }
-    }
-
+    const results = [...candidates.values()];
     if (!results.length) {
       const details = searchErrors.length
         ? `: ${searchErrors[0].slice(0, 250)}`
@@ -860,10 +935,26 @@ class MusicPlayer {
       throw new Error(`ไม่พบเพลงอื่นจากผลค้นหา YouTube${details}`);
     }
 
-    const unseen = results.filter(
-      (video) => !queue.recentTrackIds.includes(video.id),
+    const recentTitles = new Set(
+      queue.recentTrackTitles.map(normalizeTrackTitle),
     );
-    const choices = unseen.length ? unseen : results;
+    const unseen = results.filter(
+      (video) =>
+        !queue.recentTrackIds.includes(video.id) &&
+        !recentTitles.has(normalizeTrackTitle(video.title)),
+    );
+    const choices = unseen.length
+      ? unseen
+      : results.filter(
+          (video) =>
+            video.id !== lastTrack.id &&
+            normalizeTrackTitle(video.title) !==
+              normalizeTrackTitle(lastTrack.title),
+        );
+    if (!choices.length) {
+      throw new Error('ไม่พบเพลงใหม่สำหรับ Autoplay ลองอีกครั้งภายหลังครับ');
+    }
+
     const video = choices[Math.floor(Math.random() * choices.length)];
     return {
       id: video.id,
@@ -871,6 +962,13 @@ class MusicPlayer {
       url: `https://www.youtube.com/watch?v=${video.id}`,
       duration: video.duration || 0,
       thumbnail: video.thumbnail,
+      artist: video.artist,
+      artists: video.artists,
+      album_artist: video.album_artist,
+      creator: video.creator,
+      channel: video.channel,
+      uploader: video.uploader,
+      language: video.language,
       requestedBy: lastTrack.requestedBy,
     };
   }
