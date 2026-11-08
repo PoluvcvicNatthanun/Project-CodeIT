@@ -17,6 +17,8 @@ const youtubeDlConstants = require('@distube/youtube-dl/src/constants');
 const downloadYtDlp = require('@distube/youtube-dl/src/download');
 const YOUTUBE_DL_PATH =
   process.env.YOUTUBE_DL_PATH || youtubeDlConstants.YOUTUBE_DL_PATH;
+const CONFIGURED_FFMPEG_PATH =
+  process.env.FFMPEG_PATH || process.env.FFMPEG_BIN;
 
 const DEFAULT_VOLUME = 0.8;
 const VOLUME_STEP = 0.1;
@@ -24,6 +26,44 @@ const NORMALIZE_FILTER = 'loudnorm=I=-16:TP=-1.5:LRA=11';
 const PROCESS_TIMEOUT_MS = 30_000;
 let ytDlpReady;
 let cookiesWarningShown = false;
+let ffmpegReady;
+
+async function getFfmpegPath() {
+  if (!ffmpegReady) {
+    ffmpegReady = (async () => {
+      if (CONFIGURED_FFMPEG_PATH) {
+        try {
+          await fs.access(CONFIGURED_FFMPEG_PATH);
+        } catch (error) {
+          throw new Error(
+            `ไม่พบ FFmpeg ตามค่าที่ตั้งไว้ (${CONFIGURED_FFMPEG_PATH}); ตรวจสอบ FFMPEG_PATH หรือ FFMPEG_BIN`,
+            { cause: error },
+          );
+        }
+        return CONFIGURED_FFMPEG_PATH;
+      }
+
+      if (ffmpegPath) {
+        try {
+          await fs.access(ffmpegPath);
+          return ffmpegPath;
+        } catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+        }
+      }
+
+      console.warn(
+        'ไม่พบ binary ของ ffmpeg-static; จะลองใช้ ffmpeg จาก PATH ของโฮสต์',
+      );
+      return 'ffmpeg';
+    })().catch((error) => {
+      ffmpegReady = null;
+      throw error;
+    });
+  }
+
+  return ffmpegReady;
+}
 
 async function ensureYtDlp() {
   if (!ytDlpReady) {
@@ -524,6 +564,7 @@ class MusicPlayer {
 
     try {
       await ensureYtDlp();
+      const activeFfmpegPath = await getFfmpegPath();
       const ytDlp = spawn(
         YOUTUBE_DL_PATH,
         await withYtDlpCookies([
@@ -539,7 +580,7 @@ class MusicPlayer {
         { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] },
       );
       const ffmpeg = spawn(
-        ffmpegPath,
+        activeFfmpegPath,
         [
           '-hide_banner',
           '-loglevel',
@@ -590,7 +631,16 @@ class MusicPlayer {
         }
       });
       ffmpeg.once('error', (error) =>
-        this.handlePlaybackError(queue, error, generation),
+        this.handlePlaybackError(
+          queue,
+          error.code === 'ENOENT'
+            ? new Error(
+                'ไม่พบ FFmpeg บนโฮสต์ กรุณาติดตั้ง ffmpeg หรือกำหนด FFMPEG_PATH',
+                { cause: error },
+              )
+            : error,
+          generation,
+        ),
       );
       ffmpeg.once('close', (code) => {
         if (code !== 0) {
