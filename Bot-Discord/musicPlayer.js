@@ -47,6 +47,21 @@ async function ensureYtDlp() {
   await ytDlpReady;
 }
 
+function withYtDlpCookies(args) {
+  const cookiesPath = process.env.YOUTUBE_COOKIES_PATH;
+  if (!cookiesPath) return args;
+
+  const separatorIndex = args.indexOf('--');
+  const cookieArgs = ['--cookies', cookiesPath];
+  if (separatorIndex === -1) return [...args, ...cookieArgs];
+
+  return [
+    ...args.slice(0, separatorIndex),
+    ...cookieArgs,
+    ...args.slice(separatorIndex),
+  ];
+}
+
 function createPeakingFilter(sampleRate, frequency, gainDb, quality) {
   const amplitude = 10 ** (gainDb / 40);
   const omega = (2 * Math.PI * frequency) / sampleRate;
@@ -205,7 +220,7 @@ async function runYtDlp(args) {
   await ensureYtDlp();
 
   return new Promise((resolve, reject) => {
-    const process = spawn(YOUTUBE_DL_PATH, args, {
+    const process = spawn(YOUTUBE_DL_PATH, withYtDlpCookies(args), {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -471,7 +486,7 @@ class MusicPlayer {
       await ensureYtDlp();
       const ytDlp = spawn(
         YOUTUBE_DL_PATH,
-        [
+        withYtDlpCookies([
           '--no-warnings',
           '--no-playlist',
           '--format',
@@ -480,7 +495,7 @@ class MusicPlayer {
           '-',
           '--',
           track.url,
-        ],
+        ]),
         { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] },
       );
       const ffmpeg = spawn(
