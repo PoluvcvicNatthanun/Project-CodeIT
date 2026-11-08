@@ -1,5 +1,6 @@
 const { spawn } = require('node:child_process');
 const fs = require('node:fs/promises');
+const path = require('node:path');
 const { Transform } = require('node:stream');
 const {
   AudioPlayerStatus,
@@ -22,6 +23,7 @@ const VOLUME_STEP = 0.1;
 const NORMALIZE_FILTER = 'loudnorm=I=-16:TP=-1.5:LRA=11';
 const PROCESS_TIMEOUT_MS = 30_000;
 let ytDlpReady;
+let cookiesWarningShown = false;
 
 async function ensureYtDlp() {
   if (!ytDlpReady) {
@@ -47,10 +49,47 @@ async function ensureYtDlp() {
   await ytDlpReady;
 }
 
-function withYtDlpCookies(args) {
-  const cookiesPath = process.env.YOUTUBE_COOKIES_PATH;
-  if (!cookiesPath) return args;
+async function withYtDlpCookies(args) {
+  const configuredPath = process.env.YOUTUBE_COOKIES_PATH;
+  const candidates = configuredPath
+    ? [configuredPath]
+    : [
+        path.join(__dirname, 'container', 'cookies.txt'),
+        path.join(__dirname, 'cookies.txt'),
+      ];
+  let cookiesPath;
 
+  for (const candidate of candidates) {
+    try {
+      const file = await fs.stat(candidate);
+      if (file.isFile()) {
+        cookiesPath = candidate;
+        break;
+      }
+      if (configuredPath) {
+        throw new Error(`YOUTUBE_COOKIES_PATH ไม่ใช่ไฟล์: ${candidate}`);
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      if (configuredPath) {
+        throw new Error(`ไม่พบไฟล์ cookies ตาม YOUTUBE_COOKIES_PATH: ${candidate}`, {
+          cause: error,
+        });
+      }
+    }
+  }
+
+  if (!cookiesPath) {
+    if (!cookiesWarningShown) {
+      console.warn(
+        'ไม่พบไฟล์ cookies.txt; yt-dlp จะทำงานโดยไม่มี cookies และ YouTube อาจปฏิเสธคำขอ',
+      );
+      cookiesWarningShown = true;
+    }
+    return args;
+  }
+
+  console.info(`ใช้ไฟล์ YouTube cookies: ${cookiesPath}`);
   const separatorIndex = args.indexOf('--');
   const cookieArgs = ['--cookies', cookiesPath];
   if (separatorIndex === -1) return [...args, ...cookieArgs];
@@ -218,9 +257,10 @@ function titleSimilarity(first, second) {
 
 async function runYtDlp(args) {
   await ensureYtDlp();
+  const ytDlpArgs = await withYtDlpCookies(args);
 
   return new Promise((resolve, reject) => {
-    const process = spawn(YOUTUBE_DL_PATH, withYtDlpCookies(args), {
+    const process = spawn(YOUTUBE_DL_PATH, ytDlpArgs, {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -486,7 +526,7 @@ class MusicPlayer {
       await ensureYtDlp();
       const ytDlp = spawn(
         YOUTUBE_DL_PATH,
-        withYtDlpCookies([
+        await withYtDlpCookies([
           '--no-warnings',
           '--no-playlist',
           '--format',
