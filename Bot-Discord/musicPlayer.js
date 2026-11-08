@@ -858,15 +858,16 @@ class MusicPlayer {
     return queue.autoPlay;
   }
 
-  async searchYouTube(query) {
-    const output = await runYtDlp([
-      '--no-warnings',
-      '--flat-playlist',
+  async searchYouTube(query, includeDetails = false) {
+    const args = ['--no-warnings'];
+    if (!includeDetails) args.push('--flat-playlist');
+    args.push(
       '--dump-single-json',
       '--skip-download',
       '--',
       `ytsearch15:${query}`,
-    ]);
+    );
+    const output = await runYtDlp(args);
     return JSON.parse(output);
   }
 
@@ -880,9 +881,9 @@ class MusicPlayer {
       seedArtistNames.length > 0;
     const availableQueries = followSeedArtist
       ? [
-          `${seedArtistNames[0]} songs`,
-          `${seedArtistNames[0]} music`,
-          `${seedArtistNames[0]} popular songs`,
+          `${seedArtistNames[0]} most popular songs`,
+          `${seedArtistNames[0]} top hits official music video`,
+          `${seedArtistNames[0]} greatest hits`,
         ]
       : [...(thaiMusic ? THAI_TPOP_SEARCH_QUERIES : INTERNATIONAL_SEARCH_QUERIES)];
     const queries = [];
@@ -920,7 +921,7 @@ class MusicPlayer {
 
     for (const query of queries) {
       try {
-        const result = await this.searchYouTube(query);
+        const result = await this.searchYouTube(query, followSeedArtist);
         addCandidates(result);
       } catch (error) {
         searchErrors.push(error.message || String(error));
@@ -943,7 +944,7 @@ class MusicPlayer {
         !queue.recentTrackIds.includes(video.id) &&
         !recentTitles.has(normalizeTrackTitle(video.title)),
     );
-    const choices = unseen.length
+    let choices = unseen.length
       ? unseen
       : results.filter(
           (video) =>
@@ -953,6 +954,16 @@ class MusicPlayer {
         );
     if (!choices.length) {
       throw new Error('ไม่พบเพลงใหม่สำหรับ Autoplay ลองอีกครั้งภายหลังครับ');
+    }
+
+    if (followSeedArtist) {
+      choices = choices
+        .sort(
+          (first, second) =>
+            (Number(second.view_count) || 0) - (Number(first.view_count) || 0) ||
+            (Number(second.like_count) || 0) - (Number(first.like_count) || 0),
+        )
+        .slice(0, 5);
     }
 
     const video = choices[Math.floor(Math.random() * choices.length)];
